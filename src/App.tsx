@@ -6,6 +6,7 @@ import { SummaryPanel } from './components/SummaryPanel';
 import { AnnotationItem, EvaluationResult, GradingConfig, TestPaperPage } from './types';
 import { SAMPLE_PAPERS, SamplePaper } from './utils/samplePapers';
 import { AlertCircle, X } from 'lucide-react';
+import { GoogleGenAI, Type } from '@google/genai';
 
 export default function App() {
   const [apiKey, setApiKey] = useState<string>(() => {
@@ -143,69 +144,148 @@ export default function App() {
     setSelectedAnnotation(null);
   };
 
-  // Evaluate all test paper pages with Gemini as a single cohesive unit
+  // Evaluate all test paper pages directly in the browser with Gemini API
   const handleEvaluatePaper = async () => {
     if (pages.length === 0) return;
+
+    if (!apiKey.trim()) {
+      setErrorMessage('Please enter your Gemini API Key in the top header before evaluating.');
+      return;
+    }
 
     setIsEvaluating(true);
     setErrorMessage(null);
 
     try {
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (apiKey.trim()) {
-        headers['x-gemini-api-key'] = apiKey.trim();
+      const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
+
+      // Construct the multimodal contents payload
+      const parts: any[] = [];
+
+      let promptText = `Act as an expert, rigorous, and encouraging academic exam evaluator.
+Evaluate the student's submitted test paper pages thoroughly.
+Strictness setting: ${gradingConfig.strictness || 'standard'}.
+${gradingConfig.totalMarksOverride ? `Total Maximum Marks: ${gradingConfig.totalMarksOverride}` : ''}
+${gradingConfig.rubricText ? `Grading Rubric / Instructions:\n${gradingConfig.rubricText}\n` : ''}
+
+Instructions:
+1. Check answers step-by-step against standard correctness and standard curriculum keys.
+2. Award realistic marks for each correct step and penalize inaccuracies.
+3. Generate detailed visual annotations. Provide accurate 2D bounding boxes in normalized coordinates [ymin, xmin, ymax, xmax] scaled 0 to 1000 for each evaluated response.
+4. Specify the "page_number" (1-indexed starting at 1) for every single annotation.
+5. Provide overall summary strengths, weaknesses, and key improvement recommendations.`;
+
+      parts.push({ text: promptText });
+
+      // Include optional Question Paper if attached
+      if (gradingConfig.questionPaper?.dataUrl) {
+        const qpData = gradingConfig.questionPaper.dataUrl.split(',')[1] || gradingConfig.questionPaper.dataUrl;
+        parts.push({
+          text: '--- QUESTION PAPER ATTACHMENT ---',
+        });
+        parts.push({
+          inlineData: {
+            mimeType: gradingConfig.questionPaper.mimeType || 'image/jpeg',
+            data: qpData,
+          },
+        });
       }
 
-      // Payload contains ALL pages in sequence
-      const imagesPayload = pages.map((p, idx) => ({
-        dataUrl: p.dataUrl,
-        mimeType: p.mimeType,
-        name: p.name || `Page ${idx + 1}`,
-      }));
+      // Include optional Answer Key if attached
+      if (gradingConfig.answerKey?.dataUrl) {
+        const akData = gradingConfig.answerKey.dataUrl.split(',')[1] || gradingConfig.answerKey.dataUrl;
+        parts.push({
+          text: '--- OFFICIAL ANSWER KEY / SOLUTION ATTACHMENT ---',
+        });
+        parts.push({
+          inlineData: {
+            mimeType: gradingConfig.answerKey.mimeType || 'image/jpeg',
+            data: akData,
+          },
+        });
+      }
 
-      const response = await fetch('/api/evaluate', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          images: imagesPayload,
-          image: pages[0].dataUrl, // backwards compatibility
-          mimeType: pages[0].mimeType,
-          questionPaper: gradingConfig.questionPaper
-            ? {
-                dataUrl: gradingConfig.questionPaper.dataUrl,
-                mimeType: gradingConfig.questionPaper.mimeType,
-                textContent: gradingConfig.questionPaper.textContent,
-              }
-            : undefined,
-          answerKey: gradingConfig.answerKey
-            ? {
-                dataUrl: gradingConfig.answerKey.dataUrl,
-                mimeType: gradingConfig.answerKey.mimeType,
-                textContent: gradingConfig.answerKey.textContent,
-              }
-            : undefined,
-          rubricText: gradingConfig.rubricText,
-          totalMarks: gradingConfig.totalMarksOverride,
-          strictness: gradingConfig.strictness,
-        }),
+      // Include all student answer paper pages
+      pages.forEach((p, idx) => {
+        const pageData = p.dataUrl.split(',')[1] || p.dataUrl;
+        parts.push({
+          text: `--- STUDENT ANSWER PAPER: PAGE ${idx + 1} (${p.name || 'Page ' + (idx + 1)}) ---`,
+        });
+        parts.push({
+          inlineData: {
+            mimeType: p.mimeType || 'image/jpeg',
+            data: pageData,
+          },
+        });
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(
-          errorData.error || `Evaluation request failed with status ${response.status}`
-        );
-      }
+      // Call Gemini 2.5 Flash with structured JSON response
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ role: 'user', parts }],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              total_score_awarded: { type: Type.NUMBER },
+              max_possible_score: { type: Type.NUMBER },
+              percentage: { type: Type.NUMBER },
+              overall_feedback: { type: Type.STRING },
+              strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+              weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
+              improvement_tips: { type: Type.ARRAY, items: { type: Type.STRING } },
+              page_scores: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    page_number: { type: Type.NUMBER },
+                    marks_awarded: { type: Type.NUMBER },
+                    max_marks: { type: Type.NUMBER },
+                  },
+                  required: ['page_number', 'marks_awarded', 'max_marks'],
+                },
+              },
+              annotations: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    page_number: { type: Type.NUMBER },
+                    box_2d: {
+                      type: Type.ARRAY,
+                      items: { type: Type.NUMBER },
+                      description: '[ymin, xmin, ymax, xmax] coordinates normalized 0-1000',
+                    },
+                    type: {
+                      type: Type.STRING,
+                      description: 'One of: correct, incorrect, partial, comment, formula, grammar',
+                    },
+                    question_number: { type: Type.STRING },
+                    marks_awarded: { type: Type.NUMBER },
+                    max_marks: { type: Type.NUMBER },
+                    feedback_text: { type: Type.STRING },
+                    improvement_tip: { type: Type.STRING },
+                  },
+                  required: ['page_number', 'box_2d', 'type', 'feedback_text'],
+                },
+              },
+            },
+            required: ['total_score_awarded', 'max_possible_score', 'annotations'],
+          },
+        },
+      });
 
-      const evaluation: EvaluationResult = await response.json();
+      const responseText = response.text || '{}';
+      const evaluation: EvaluationResult = JSON.parse(responseText);
+
       setGlobalEvaluation(evaluation);
 
       // Distribute annotations and page scores to each individual page
       const updatedPages = pages.map((p, idx) => {
         const pageNum = idx + 1;
-        const pageAnns = evaluation.annotations.filter(
+        const pageAnns = (evaluation.annotations || []).filter(
           (a) => (a.page_number || 1) === pageNum
         );
         const pageScoreInfo = evaluation.page_scores?.find(
@@ -242,7 +322,7 @@ export default function App() {
       console.error('Paper evaluation failed:', err);
       setErrorMessage(
         err.message ||
-          'Failed to evaluate paper with Gemini. Please check your connection or try again.'
+          'Failed to evaluate paper with Gemini. Please check your API key and try again.'
       );
     } finally {
       setIsEvaluating(false);
