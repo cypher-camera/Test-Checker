@@ -221,7 +221,7 @@ Instructions:
 
       // Call Gemini 2.5 Flash with structured JSON response
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: [{ role: 'user', parts }],
         config: {
           responseMimeType: 'application/json',
