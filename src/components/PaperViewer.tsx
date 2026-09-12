@@ -94,15 +94,21 @@ export const PaperViewer: React.FC<PaperViewerProps> = ({
           <button
             type="button"
             onClick={() => setShowPenMarks(!showPenMarks)}
-            className={`inline-flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors cursor-pointer ${
+            className={`inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors cursor-pointer ${
               showPenMarks
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-xs'
                 : 'bg-white text-slate-500 border-slate-200 opacity-60'
             }`}
             title="Toggle red/green teacher pen checkmarks and crosses"
           >
-            <Check className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Pen Marks</span>
+            <Check className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Pen Marks</span>
+            {annotations.length > 0 && (
+              <span className="text-[10px] bg-white/90 px-1.5 py-0.2 rounded font-mono font-bold text-slate-700 border border-slate-200">
+                {annotations.filter((a) => a.type === 'correct').length}✓{' '}
+                {annotations.filter((a) => a.type === 'incorrect').length}✗
+              </span>
+            )}
           </button>
 
           <button
@@ -381,24 +387,88 @@ export const PaperViewer: React.FC<PaperViewerProps> = ({
                       />
                     )}
 
-                    {/* Teacher Pen Symbol (Checkmark, Cross, Squiggle) */}
+                    {/* Teacher Pen Symbol (Checkmark, Cross, Squiggle) with smart edge clamping */}
                     {showPenMarks && (
                       <div
-                        className="absolute -left-7 top-0 text-xl font-bold select-none drop-shadow-xs"
-                        style={{ color: strokeColor }}
+                        className={`absolute select-none pointer-events-none flex flex-col items-center z-30 transition-transform group-hover:scale-110 ${
+                          leftPct < 5 ? 'left-1 -top-6' : '-left-9 -top-2'
+                        }`}
                       >
-                        {isCorrect && <span className="font-handwriting text-3xl font-extrabold text-emerald-600">✓</span>}
-                        {isIncorrect && <span className="font-handwriting text-3xl font-extrabold text-red-600">✗</span>}
-                        {isPartial && <span className="font-handwriting text-3xl font-extrabold text-amber-600">~</span>}
+                        {isCorrect && (
+                          <div className="flex flex-col items-center">
+                            <svg
+                              viewBox="0 0 24 24"
+                              className="w-8 h-8 text-emerald-600 drop-shadow-[0_2px_4px_rgba(0,0,0,0.35)]"
+                            >
+                              <path
+                                d="M4 12.5l5.5 5.5L20 6"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                            <span className="text-[11px] font-black text-emerald-800 bg-emerald-100/90 px-1 rounded shadow-xs font-mono leading-none mt-0.5 border border-emerald-300">
+                              +{ann.marks_awarded}
+                            </span>
+                          </div>
+                        )}
+
+                        {isIncorrect && (
+                          <div className="flex flex-col items-center">
+                            <svg
+                              viewBox="0 0 24 24"
+                              className="w-8 h-8 text-red-600 drop-shadow-[0_2px_4px_rgba(0,0,0,0.35)]"
+                            >
+                              <path
+                                d="M5 5l14 14M19 5L5 19"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                            <span className="text-[11px] font-black text-red-800 bg-red-100/90 px-1 rounded shadow-xs font-mono leading-none mt-0.5 border border-red-300">
+                              0
+                            </span>
+                          </div>
+                        )}
+
+                        {isPartial && (
+                          <div className="flex flex-col items-center">
+                            <svg
+                              viewBox="0 0 24 24"
+                              className="w-8 h-8 text-amber-600 drop-shadow-[0_2px_4px_rgba(0,0,0,0.35)]"
+                            >
+                              <path
+                                d="M4 12c3-4 6-4 8 0s6 4 8 0"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3.6"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                            <span className="text-[11px] font-black text-amber-800 bg-amber-100/90 px-1 rounded shadow-xs font-mono leading-none mt-0.5 border border-amber-300">
+                              {ann.marks_awarded}/{ann.max_marks}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
 
                     {/* Teacher Handwritten Margin Sticky Callout */}
                     {showMarginNotes && (
                       <div
-                        className="absolute left-full ml-3 top-0 flex items-center space-x-1.5 whitespace-nowrap z-20 pointer-events-auto"
+                        className={`absolute whitespace-nowrap z-20 pointer-events-auto flex items-center space-x-1.5 ${
+                          leftPct + widthPct > 80
+                            ? 'right-0 -top-6'
+                            : 'left-full ml-3 top-0'
+                        }`}
                         style={{
-                          transform: 'translateY(-20%)',
+                          transform: leftPct + widthPct > 80 ? undefined : 'translateY(-20%)',
                         }}
                       >
                         {/* Score Chip */}
@@ -409,6 +479,12 @@ export const PaperViewer: React.FC<PaperViewerProps> = ({
                             ? `+${ann.marks_awarded}`
                             : `${ann.marks_awarded}/${ann.max_marks}`}
                         </span>
+
+                        {ann.is_mcq && (
+                          <span className="text-[9px] font-extrabold uppercase bg-purple-100 text-purple-800 px-1 py-0.5 rounded border border-purple-300">
+                            MCQ
+                          </span>
+                        )}
 
                         {/* Handwriting Note */}
                         <span

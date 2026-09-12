@@ -14,20 +14,27 @@ import {
   Image as ImageIcon,
   Eye,
   X,
+  Layers,
+  RotateCw,
+  Loader2,
 } from 'lucide-react';
 import { GradingConfig, GradingStrictness, SupportingDocument, TestPaperPage } from '../types';
 import { optimizeImageForEvaluation } from '../utils/imageOptimizer';
+import { extractPagesFromPdf, isPdfFile, cleanStudentName } from '../utils/pdfExtractor';
 
 interface UploadSectionProps {
   pages: TestPaperPage[];
   activePageIndex: number;
   onSelectPage: (index: number) => void;
   onAddPages: (newPages: TestPaperPage[]) => void;
+  onReplacePages?: (newPages: TestPaperPage[], studentName?: string) => void;
   onRemovePage: (index: number) => void;
   config: GradingConfig;
   onConfigChange: (config: GradingConfig) => void;
   onEvaluate: () => void;
   isEvaluating: boolean;
+  studentName?: string;
+  onUpdateStudentName?: (name: string) => void;
 }
 
 export const UploadSection: React.FC<UploadSectionProps> = ({
@@ -35,13 +42,17 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
   activePageIndex,
   onSelectPage,
   onAddPages,
+  onReplacePages,
   onRemovePage,
   config,
   onConfigChange,
   onEvaluate,
   isEvaluating,
+  studentName,
+  onUpdateStudentName,
 }) => {
   const studentFileInputRef = useRef<HTMLInputElement>(null);
+  const studentReplaceInputRef = useRef<HTMLInputElement>(null);
   const qpFileInputRef = useRef<HTMLInputElement>(null);
   const akFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -49,83 +60,164 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
   const [activeTab, setActiveTab] = useState<'student' | 'documents' | 'settings'>('student');
   const [previewDoc, setPreviewDoc] = useState<SupportingDocument | null>(null);
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState<string | null>(null);
 
-  // Handle student test paper uploads with automatic optimization
-  const handleStudentFiles = async (files: FileList | null) => {
+  // Handle student test paper uploads (PDF booklets or image scans)
+  const handleStudentFiles = async (files: FileList | null, replaceMode = false) => {
     if (!files || files.length === 0) return;
 
     setIsProcessingFiles(true);
+    setProcessingStatus('Processing file...');
     const newPages: TestPaperPage[] = [];
+    let derivedStudentName = '';
 
     try {
       for (const file of Array.from(files)) {
-        if (!file.type.startsWith('image/')) continue;
+        if (isPdfFile(file)) {
+          setProcessingStatus(`Extracting pages from ${file.name}...`);
+          const extracted = await extractPagesFromPdf(file);
+          if (!derivedStudentName) {
+            derivedStudentName = cleanStudentName(file.name);
+          }
 
-        const optimized = await optimizeImageForEvaluation(file, 1800, 0.92);
-        newPages.push({
-          id: `page-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          name: file.name,
-          dataUrl: optimized.dataUrl,
-          mimeType: optimized.mimeType,
-          width: optimized.width,
-          height: optimized.height,
-        });
+          extracted.forEach((p) => {
+            newPages.push({
+              id: `page-${Date.now()}-${p.pageNumber}-${Math.random().toString(36).substring(2, 6)}`,
+              name: `${file.name} (Page ${p.pageNumber})`,
+              dataUrl: p.dataUrl,
+              mimeType: 'image/jpeg',
+              width: p.width,
+              height: p.height,
+              pageNumber: p.pageNumber,
+            });
+          });
+        } else if (file.type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(file.name)) {
+          setProcessingStatus(`Optimizing ${file.name}...`);
+          const optimized = await optimizeImageForEvaluation(file, 1800, 0.92);
+          if (!derivedStudentName) {
+            derivedStudentName = cleanStudentName(file.name);
+          }
+          newPages.push({
+            id: `page-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            name: file.name,
+            dataUrl: optimized.dataUrl,
+            mimeType: optimized.mimeType,
+            width: optimized.width,
+            height: optimized.height,
+          });
+        }
       }
 
       if (newPages.length > 0) {
-        onAddPages(newPages);
+        if (replaceMode && onReplacePages) {
+          onReplacePages(newPages, derivedStudentName);
+        } else if (pages.length === 0 && onReplacePages) {
+          onReplacePages(newPages, derivedStudentName);
+        } else {
+          onAddPages(newPages);
+          if (derivedStudentName && onUpdateStudentName && !studentName) {
+            onUpdateStudentName(derivedStudentName);
+          }
+        }
       }
     } catch (err) {
-      console.error('Error processing image:', err);
-      alert('Failed to process image. Please try another file.');
+      console.error('Error processing student paper:', err);
+      alert('Failed to process file. Please ensure it is a valid PDF or image file.');
     } finally {
       setIsProcessingFiles(false);
+      setProcessingStatus(null);
     }
   };
 
-  // Handle Question Paper upload
+  // Handle Question Paper upload (PDF or image)
   const handleQuestionPaperFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setIsProcessingFiles(true);
     try {
-      const optimized = await optimizeImageForEvaluation(file, 1600, 0.9);
-      onConfigChange({
-        ...config,
-        questionPaper: {
-          id: `qp-${Date.now()}`,
-          name: file.name,
-          type: 'image',
-          dataUrl: optimized.dataUrl,
-          mimeType: optimized.mimeType,
-        },
-      });
+      if (isPdfFile(file)) {
+        setProcessingStatus('Extracting Question Paper PDF...');
+        const extracted = await extractPagesFromPdf(file);
+        if (extracted.length > 0) {
+          onConfigChange({
+            ...config,
+            questionPaper: {
+              id: `qp-${Date.now()}`,
+              name: file.name,
+              type: 'pdf',
+              dataUrl: extracted[0].dataUrl,
+              mimeType: 'image/jpeg',
+              pageCount: extracted.length,
+            },
+          });
+        }
+      } else {
+        setProcessingStatus('Optimizing Question Paper scan...');
+        const optimized = await optimizeImageForEvaluation(file, 1600, 0.9);
+        onConfigChange({
+          ...config,
+          questionPaper: {
+            id: `qp-${Date.now()}`,
+            name: file.name,
+            type: 'image',
+            dataUrl: optimized.dataUrl,
+            mimeType: optimized.mimeType,
+          },
+        });
+      }
     } catch (err) {
       console.error(err);
-      alert('Failed to load question paper image');
+      alert('Failed to load question paper file');
+    } finally {
+      setIsProcessingFiles(false);
+      setProcessingStatus(null);
     }
   };
 
-  // Handle Answer Key upload
+  // Handle Answer Key upload (PDF or image)
   const handleAnswerKeyFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setIsProcessingFiles(true);
     try {
-      const optimized = await optimizeImageForEvaluation(file, 1600, 0.9);
-      onConfigChange({
-        ...config,
-        answerKey: {
-          id: `ak-${Date.now()}`,
-          name: file.name,
-          type: 'image',
-          dataUrl: optimized.dataUrl,
-          mimeType: optimized.mimeType,
-        },
-      });
+      if (isPdfFile(file)) {
+        setProcessingStatus('Extracting Answer Key PDF...');
+        const extracted = await extractPagesFromPdf(file);
+        if (extracted.length > 0) {
+          onConfigChange({
+            ...config,
+            answerKey: {
+              id: `ak-${Date.now()}`,
+              name: file.name,
+              type: 'pdf',
+              dataUrl: extracted[0].dataUrl,
+              mimeType: 'image/jpeg',
+              pageCount: extracted.length,
+            },
+          });
+        }
+      } else {
+        setProcessingStatus('Optimizing Answer Key scan...');
+        const optimized = await optimizeImageForEvaluation(file, 1600, 0.9);
+        onConfigChange({
+          ...config,
+          answerKey: {
+            id: `ak-${Date.now()}`,
+            name: file.name,
+            type: 'image',
+            dataUrl: optimized.dataUrl,
+            mimeType: optimized.mimeType,
+          },
+        });
+      }
     } catch (err) {
       console.error(err);
-      alert('Failed to load answer key image');
+      alert('Failed to load answer key file');
+    } finally {
+      setIsProcessingFiles(false);
+      setProcessingStatus(null);
     }
   };
 
@@ -288,23 +380,47 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                 </div>
               ))}
 
+              {/* Replace Current Exam Button */}
+              <button
+                type="button"
+                onClick={() => studentReplaceInputRef.current?.click()}
+                disabled={isProcessingFiles}
+                className="shrink-0 w-20 h-20 sm:w-24 sm:h-26 rounded-xl border border-slate-300 hover:border-slate-400 bg-white hover:bg-slate-50 flex flex-col items-center justify-center text-slate-600 transition-colors p-2 text-center cursor-pointer shadow-2xs"
+                title="Replace current paper with a new PDF or set of scans"
+              >
+                <RotateCw className="w-4 h-4 mb-1 text-slate-500" />
+                <span className="text-[10px] font-bold leading-tight">Replace Exam</span>
+                <span className="text-[8px] text-slate-400 mt-0.5">PDF / Scans</span>
+              </button>
+
               {/* Add More Student Pages */}
               <button
                 type="button"
                 onClick={() => studentFileInputRef.current?.click()}
                 disabled={isProcessingFiles}
                 className="shrink-0 w-16 h-20 sm:w-20 sm:h-26 rounded-xl border-2 border-dashed border-slate-300 hover:border-red-400 hover:bg-red-50/30 flex flex-col items-center justify-center text-slate-500 hover:text-red-600 transition-colors p-2 text-center cursor-pointer"
+                title="Add more pages to this student's answer sheet"
               >
                 <Plus className="w-5 h-5 mb-1" />
-                <span className="text-[10px] font-bold">Add Page</span>
+                <span className="text-[10px] font-bold leading-tight">Add Page</span>
+                <span className="text-[8px] text-slate-400 mt-0.5">PDF/Img</span>
               </button>
 
               <input
                 ref={studentFileInputRef}
                 type="file"
                 multiple
-                accept="image/png,image/jpeg,image/webp,image/jpg"
-                onChange={(e) => handleStudentFiles(e.target.files)}
+                accept="application/pdf,.pdf,image/png,image/jpeg,image/webp,image/jpg"
+                onChange={(e) => handleStudentFiles(e.target.files, false)}
+                className="hidden"
+              />
+
+              <input
+                ref={studentReplaceInputRef}
+                type="file"
+                multiple
+                accept="application/pdf,.pdf,image/png,image/jpeg,image/webp,image/jpg"
+                onChange={(e) => handleStudentFiles(e.target.files, true)}
                 className="hidden"
               />
             </div>
@@ -320,25 +436,54 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                 onDrop={(e) => {
                   e.preventDefault();
                   setIsDragOverStudent(false);
-                  handleStudentFiles(e.dataTransfer.files);
+                  handleStudentFiles(e.dataTransfer.files, true);
                 }}
-                onClick={() => studentFileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-colors ${
+                className={`border-2 border-dashed rounded-2xl p-8 text-center transition-colors ${
                   isDragOverStudent
                     ? 'border-red-500 bg-red-50/50'
                     : 'border-slate-300 hover:border-slate-400 bg-slate-50/50'
                 }`}
               >
-                <UploadCloud className="w-10 h-10 mx-auto text-slate-400 mb-2" />
+                <div className="flex items-center justify-center space-x-2 text-slate-400 mb-2">
+                  <FileText className="w-8 h-8 text-red-500" />
+                  <UploadCloud className="w-8 h-8 text-slate-400" />
+                </div>
                 <h3 className="text-sm font-bold text-slate-800">
-                  Drop Student Solved Test Paper Scans Here
+                  Drop Student Exam Paper PDF or Photo Scans Here
                 </h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Supports high-resolution phone camera photos or scans (PNG, JPG, WebP).
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                  <strong>PDF support:</strong> Multi-page PDF booklets are automatically rendered into high-res continuous answer sheets. Phone photos (PNG, JPG, WebP) are also supported.
                 </p>
-                <p className="text-xs text-red-600 font-semibold mt-2">
-                  Click to choose files
-                </p>
+
+                <div className="mt-4 flex items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => studentFileInputRef.current?.click()}
+                    disabled={isProcessingFiles}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+                  >
+                    <FileText className="w-4 h-4" />
+                    <span>Select Student PDF Booklet</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => studentFileInputRef.current?.click()}
+                    disabled={isProcessingFiles}
+                    className="px-4 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-xs font-semibold rounded-xl shadow-2xs transition-colors flex items-center space-x-1.5 cursor-pointer"
+                  >
+                    <ImageIcon className="w-4 h-4 text-slate-500" />
+                    <span>Select Image Scans (PNG/JPG)</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Processing banner */}
+            {isProcessingFiles && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-center space-x-2 animate-pulse">
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span className="font-semibold">{processingStatus || 'Processing file...'}</span>
               </div>
             )}
           </div>
@@ -381,7 +526,7 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                 )}
               </div>
 
-              {/* Uploaded Question Paper Image Preview */}
+              {/* Uploaded Question Paper Preview */}
               {config.questionPaper?.dataUrl ? (
                 <div className="flex items-center space-x-3 bg-white border border-slate-200 rounded-lg p-2.5">
                   <img
@@ -394,7 +539,9 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                       {config.questionPaper.name}
                     </p>
                     <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded inline-block mt-0.5">
-                      ✓ Scanned Image Attached
+                      {config.questionPaper.type === 'pdf'
+                        ? `✓ PDF Document Attached (${config.questionPaper.pageCount || 1} Pages)`
+                        : '✓ Scanned Image Attached'}
                     </span>
                     <div className="mt-1 flex items-center space-x-2">
                       <button
@@ -403,7 +550,7 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                         className="text-xs text-blue-600 hover:underline flex items-center space-x-1 font-medium"
                       >
                         <Eye className="w-3 h-3" />
-                        <span>Inspect Full Image</span>
+                        <span>Inspect Preview</span>
                       </button>
                     </div>
                   </div>
@@ -415,13 +562,13 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                     onClick={() => qpFileInputRef.current?.click()}
                     className="w-full py-3 px-4 border-2 border-dashed border-slate-300 hover:border-blue-400 hover:bg-blue-50/40 rounded-xl text-center transition-colors flex items-center justify-center space-x-2 text-xs font-semibold text-slate-600 cursor-pointer"
                   >
-                    <ImageIcon className="w-4 h-4 text-blue-600" />
-                    <span>Upload Question Paper (Photo / Scan)</span>
+                    <FileQuestion className="w-4 h-4 text-blue-600" />
+                    <span>Upload Question Paper (PDF or Photo / Scan)</span>
                   </button>
                   <input
                     ref={qpFileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="application/pdf,.pdf,image/*"
                     onChange={handleQuestionPaperFile}
                     className="hidden"
                   />
@@ -489,7 +636,7 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                 )}
               </div>
 
-              {/* Uploaded Answer Key Image Preview */}
+              {/* Uploaded Answer Key Preview */}
               {config.answerKey?.dataUrl ? (
                 <div className="flex items-center space-x-3 bg-white border border-slate-200 rounded-lg p-2.5">
                   <img
@@ -502,7 +649,9 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                       {config.answerKey.name}
                     </p>
                     <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded inline-block mt-0.5">
-                      ✓ Answer Key Image Attached
+                      {config.answerKey.type === 'pdf'
+                        ? `✓ PDF Document Attached (${config.answerKey.pageCount || 1} Pages)`
+                        : '✓ Answer Key Image Attached'}
                     </span>
                     <div className="mt-1 flex items-center space-x-2">
                       <button
@@ -511,7 +660,7 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                         className="text-xs text-emerald-600 hover:underline flex items-center space-x-1 font-medium"
                       >
                         <Eye className="w-3 h-3" />
-                        <span>Inspect Full Image</span>
+                        <span>Inspect Preview</span>
                       </button>
                     </div>
                   </div>
@@ -523,13 +672,13 @@ export const UploadSection: React.FC<UploadSectionProps> = ({
                     onClick={() => akFileInputRef.current?.click()}
                     className="w-full py-3 px-4 border-2 border-dashed border-slate-300 hover:border-emerald-400 hover:bg-emerald-50/40 rounded-xl text-center transition-colors flex items-center justify-center space-x-2 text-xs font-semibold text-slate-600 cursor-pointer"
                   >
-                    <ImageIcon className="w-4 h-4 text-emerald-600" />
-                    <span>Upload Answer Key (Photo / Scan)</span>
+                    <CheckSquare className="w-4 h-4 text-emerald-600" />
+                    <span>Upload Answer Key (PDF or Photo / Scan)</span>
                   </button>
                   <input
                     ref={akFileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="application/pdf,.pdf,image/*"
                     onChange={handleAnswerKeyFile}
                     className="hidden"
                   />

@@ -1,6 +1,6 @@
 {
   "name": "Test Checker",
-  "description": "AI-powered exam paper grading and visual annotation system that performs OCR, scores student answers against rubrics, and overlays teacher-style pen marks, score stamps, and margin notes.",
+  "description": "AI-powered exam paper grading and comparative ranking system that performs OCR across 100s of papers, maintains exam history, generates visual teacher pen annotations, and creates class merit comparison reports.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

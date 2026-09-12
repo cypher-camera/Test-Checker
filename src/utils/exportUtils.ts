@@ -1,5 +1,5 @@
 import { jsPDF } from 'jspdf';
-import { AnnotationItem, EvaluationResult, TestPaperPage } from '../types';
+import { AnnotationItem, ClassStatistics, EvaluationResult, ExamRecord, TestPaperPage } from '../types';
 
 /**
  * Draws teacher annotations on top of an image onto a target canvas at original full resolution.
@@ -101,28 +101,38 @@ export async function renderGradedCanvas(
           ctx.lineCap = 'round';
           ctx.lineJoin = 'round';
 
-          const markX = Math.max(15, x - 28);
-          const markY = y + 16;
+          const markX = x < 35 ? Math.max(8, x + 4) : Math.max(8, x - 32);
+          const markY = Math.max(22, y + 16);
 
           if (isCorrect) {
             // Draw authentic teacher checkmark
             ctx.beginPath();
             ctx.moveTo(markX, markY - 6);
-            ctx.lineTo(markX + 7, markY + 4);
-            ctx.lineTo(markX + 22, markY - 14);
+            ctx.lineTo(markX + 8, markY + 6);
+            ctx.lineTo(markX + 24, markY - 14);
             ctx.stroke();
+
+            // Small score stamp underneath
+            ctx.font = 'bold 12px monospace';
+            ctx.fillText(`+${ann.marks_awarded}`, markX + 4, markY + 20);
           } else if (isIncorrect) {
             // Draw cross mark (X)
             ctx.beginPath();
             ctx.moveTo(markX, markY - 12);
-            ctx.lineTo(markX + 16, markY + 4);
-            ctx.moveTo(markX + 16, markY - 12);
-            ctx.lineTo(markX, markY + 4);
+            ctx.lineTo(markX + 18, markY + 6);
+            ctx.moveTo(markX + 18, markY - 12);
+            ctx.lineTo(markX, markY + 6);
             ctx.stroke();
+
+            // Small score stamp underneath
+            ctx.font = 'bold 12px monospace';
+            ctx.fillText('0', markX + 6, markY + 20);
           } else if (isPartial) {
             // Draw Tilde or partial mark
             ctx.font = 'bold 26px "Caveat", cursive, sans-serif';
             ctx.fillText('~', markX + 4, markY);
+            ctx.font = 'bold 11px monospace';
+            ctx.fillText(`${ann.marks_awarded}/${ann.max_marks}`, markX, markY + 16);
           }
           ctx.restore();
         }
@@ -500,4 +510,150 @@ export function downloadEvaluationJSON(evaluation: EvaluationResult, filename = 
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Exports class merit list and exam comparison ranking as CSV
+ */
+export function exportClassRankingCSV(records: ExamRecord[], filename = 'class-merit-ranking.csv') {
+  const headers = ['Rank', 'Student Name', 'Roll Number', 'Subject', 'Marks Awarded', 'Max Marks', 'Percentage (%)', 'Grade', 'Percentile', 'Key Strengths', 'Areas to Improve', 'Date Evaluated'];
+  
+  const rows = records.map((r) => [
+    r.rank ?? '',
+    `"${(r.studentName || '').replace(/"/g, '""')}"`,
+    `"${(r.rollNumber || '').replace(/"/g, '""')}"`,
+    `"${(r.subject || '').replace(/"/g, '""')}"`,
+    r.marksAwarded,
+    r.maxMarks,
+    `${r.percentage}%`,
+    r.grade,
+    r.percentile ? `${r.percentile}th` : '',
+    `"${(r.strengths || []).join('; ').replace(/"/g, '""')}"`,
+    `"${(r.weaknesses || []).join('; ').replace(/"/g, '""')}"`,
+    new Date(r.evaluatedAt).toLocaleDateString(),
+  ]);
+
+  const csvContent = [headers.join(','), ...rows.map((row) => row.join(','))].join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Downloads formatted Class Comparison & Ranking Report PDF
+ */
+export function downloadClassRankingPDF(records: ExamRecord[], stats: ClassStatistics, title = 'Class Examination Comparison Report') {
+  const pdf = new jsPDF('p', 'pt', 'a4');
+  const pageWidth = pdf.internal.pageSize.getWidth();
+  let curY = 40;
+
+  // Header Banner
+  pdf.setFillColor(15, 23, 42); // slate-900
+  pdf.rect(0, 0, pageWidth, 75, 'F');
+
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(18);
+  pdf.setTextColor(255, 255, 255);
+  pdf.text('ACADEMIC ASSESSMENT & CLASS MERIT RANKING', 35, 38);
+
+  pdf.setFont('helvetica', 'normal');
+  pdf.setFontSize(10);
+  pdf.setTextColor(148, 163, 184);
+  pdf.text(`Generated on ${new Date().toLocaleDateString()} | Total Papers Checked: ${stats.totalPapers}`, 35, 58);
+
+  curY = 95;
+
+  // Statistics Summary Cards
+  pdf.setFillColor(248, 250, 252);
+  pdf.setDrawColor(226, 232, 240);
+  pdf.roundedRect(35, curY, pageWidth - 70, 65, 6, 6, 'FD');
+
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(9);
+  pdf.setTextColor(100, 116, 139);
+  pdf.text('CLASS AVERAGE', 55, curY + 20);
+  pdf.text('TOP SCORE (1ST RANK)', 180, curY + 20);
+  pdf.text('PASSING RATE', 340, curY + 20);
+  pdf.text('LOWEST SCORE', 450, curY + 20);
+
+  pdf.setFontSize(16);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text(`${stats.classAveragePercentage}%`, 55, curY + 45);
+  pdf.text(`${stats.highestMarks} pts`, 180, curY + 45);
+  pdf.text(`${stats.passRate}%`, 340, curY + 45);
+  pdf.text(`${stats.lowestMarks} pts`, 450, curY + 45);
+
+  curY += 85;
+
+  // Table Title
+  pdf.setFont('helvetica', 'bold');
+  pdf.setFontSize(12);
+  pdf.setTextColor(15, 23, 42);
+  pdf.text('Student Merit Leaderboard & Score Breakdown', 35, curY);
+  curY += 15;
+
+  // Table Headers
+  pdf.setFillColor(241, 245, 249);
+  pdf.rect(35, curY, pageWidth - 70, 20, 'F');
+  pdf.setFontSize(9);
+  pdf.setFont('helvetica', 'bold');
+  pdf.setTextColor(71, 85, 105);
+  pdf.text('Rank', 45, curY + 13);
+  pdf.text('Student Name', 90, curY + 13);
+  pdf.text('Roll / ID', 230, curY + 13);
+  pdf.text('Score', 320, curY + 13);
+  pdf.text('Percentage', 390, curY + 13);
+  pdf.text('Grade', 460, curY + 13);
+  pdf.text('Percentile', 505, curY + 13);
+
+  curY += 24;
+
+  pdf.setFont('helvetica', 'normal');
+  records.forEach((rec, idx) => {
+    if (curY > 780) {
+      pdf.addPage('a4', 'portrait');
+      curY = 40;
+    }
+
+    if (idx % 2 === 1) {
+      pdf.setFillColor(248, 250, 252);
+      pdf.rect(35, curY - 2, pageWidth - 70, 18, 'F');
+    }
+
+    pdf.setTextColor(15, 23, 42);
+    // Rank
+    pdf.setFont('helvetica', 'bold');
+    const rankStr = rec.rank === 1 ? '#1 (Top)' : `#${rec.rank || idx + 1}`;
+    pdf.text(rankStr, 45, curY + 10);
+
+    pdf.setFont('helvetica', 'normal');
+    // Name
+    const nameStr = (rec.studentName || 'Student').substring(0, 24);
+    pdf.text(nameStr, 90, curY + 10);
+    // Roll
+    pdf.text(rec.rollNumber || '-', 230, curY + 10);
+    // Score
+    pdf.text(`${rec.marksAwarded} / ${rec.maxMarks}`, 320, curY + 10);
+    // Percentage
+    pdf.text(`${rec.percentage}%`, 390, curY + 10);
+    // Grade
+    pdf.setFont('helvetica', 'bold');
+    pdf.text(rec.grade, 465, curY + 10);
+    pdf.setFont('helvetica', 'normal');
+    // Percentile
+    pdf.text(rec.percentile ? `${rec.percentile}%` : '-', 510, curY + 10);
+
+    pdf.setDrawColor(241, 245, 249);
+    pdf.line(35, curY + 16, pageWidth - 35, curY + 16);
+
+    curY += 20;
+  });
+
+  pdf.save('class-merit-ranking-report.pdf');
 }
