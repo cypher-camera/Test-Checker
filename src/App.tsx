@@ -151,6 +151,62 @@ export default function App() {
     if (!apiKey.trim()) {
       setErrorMessage('Please enter your Gemini API Key in the top header before evaluating.');
       return;
+      const { data: evaluation, activeModel } = await evaluateWithModelFallback(
+  ai,
+  parts,
+  {
+    responseMimeType: 'application/json',
+    responseSchema: {
+      type: Type.OBJECT,
+      properties: {
+        total_score_awarded: { type: Type.NUMBER },
+        max_possible_score: { type: Type.NUMBER },
+        percentage: { type: Type.NUMBER },
+        overall_feedback: { type: Type.STRING },
+        strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
+        weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
+        improvement_tips: { type: Type.ARRAY, items: { type: Type.STRING } },
+        page_scores: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              page_number: { type: Type.NUMBER },
+              marks_awarded: { type: Type.NUMBER },
+              max_marks: { type: Type.NUMBER },
+            },
+            required: ['page_number', 'marks_awarded', 'max_marks'],
+          },
+        },
+        annotations: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              page_number: { type: Type.NUMBER },
+              box_2d: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: '[ymin, xmin, ymax, xmax] 0-1000',
+              },
+              type: { type: Type.STRING },
+              question_number: { type: Type.STRING },
+              marks_awarded: { type: Type.NUMBER },
+              max_marks: { type: Type.NUMBER },
+              feedback_text: { type: Type.STRING },
+              improvement_tip: { type: Type.STRING },
+            },
+            required: ['page_number', 'box_2d', 'type', 'feedback_text'],
+          },
+        },
+      },
+      required: ['total_score_awarded', 'max_possible_score', 'annotations'],
+    },
+  }
+);
+
+console.log(`Successfully graded using ${activeModel}`);
+setGlobalEvaluation(evaluation);
     }
 
     setIsEvaluating(true);
@@ -218,65 +274,50 @@ Instructions:
           },
         });
       });
+      // Defined fallback order from fastest/primary to backup alternatives
+const MODEL_CANDIDATES = [
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
+];
 
-      // Call Gemini 2.5 Flash with structured JSON response
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const evaluateWithModelFallback = async (ai: any, parts: any[], config: any) => {
+  let lastError: any = null;
+
+  for (const model of MODEL_CANDIDATES) {
+    try {
+      console.info(`Attempting evaluation with model: ${model}`);
+      
       const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+        model,
         contents: [{ role: 'user', parts }],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              total_score_awarded: { type: Type.NUMBER },
-              max_possible_score: { type: Type.NUMBER },
-              percentage: { type: Type.NUMBER },
-              overall_feedback: { type: Type.STRING },
-              strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
-              weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
-              improvement_tips: { type: Type.ARRAY, items: { type: Type.STRING } },
-              page_scores: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    page_number: { type: Type.NUMBER },
-                    marks_awarded: { type: Type.NUMBER },
-                    max_marks: { type: Type.NUMBER },
-                  },
-                  required: ['page_number', 'marks_awarded', 'max_marks'],
-                },
-              },
-              annotations: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    page_number: { type: Type.NUMBER },
-                    box_2d: {
-                      type: Type.ARRAY,
-                      items: { type: Type.NUMBER },
-                      description: '[ymin, xmin, ymax, xmax] coordinates normalized 0-1000',
-                    },
-                    type: {
-                      type: Type.STRING,
-                      description: 'One of: correct, incorrect, partial, comment, formula, grammar',
-                    },
-                    question_number: { type: Type.STRING },
-                    marks_awarded: { type: Type.NUMBER },
-                    max_marks: { type: Type.NUMBER },
-                    feedback_text: { type: Type.STRING },
-                    improvement_tip: { type: Type.STRING },
-                  },
-                  required: ['page_number', 'box_2d', 'type', 'feedback_text'],
-                },
-              },
-            },
-            required: ['total_score_awarded', 'max_possible_score', 'annotations'],
-          },
-        },
+        config,
       });
 
+      if (response?.text) {
+        return { data: JSON.parse(response.text), activeModel: model };
+      }
+    } catch (err: any) {
+      console.warn(`Model ${model} failed or rate-limited. Moving to fallback...`, err);
+      lastError = err;
+
+      // If rate-limited (HTTP 429) or temporary demand overload (503), give a brief backoff
+      const status = err?.status || err?.code || 0;
+      if (status === 429 || status === 503) {
+        await sleep(1500);
+      }
+    }
+  }
+
+  throw new Error(
+    lastError?.message || 'All fallback models exhausted due to high demand. Please try again shortly.'
+  );
+};
+
+    
       const responseText = response.text || '{}';
       const evaluation: EvaluationResult = JSON.parse(responseText);
 
